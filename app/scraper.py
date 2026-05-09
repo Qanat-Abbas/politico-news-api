@@ -38,235 +38,201 @@ class PoliticoBrowser:
         driver = self._open_browser()
         try:
             result_url = self._search(driver, keyword)
+
             if not result_url:
                 return _rss_fallback(keyword)
 
             driver.get(result_url)
             self._wait_for_body(driver)
             sleep(1)
+
             article = Article(result_url, self._read_article(driver))
+
             if _is_security_check(article.body):
                 return _rss_fallback(keyword)
+
             return article
+
         except WebDriverException as exc:
-            fallback = _rss_fallback(keyword)
-            if fallback.url:
-                return fallback
-            return Article("", f"Selenium failed while reading Politico: {exc.msg}")
+            return _rss_fallback(keyword)
+
         finally:
             driver.quit()
 
     def _open_browser(self) -> webdriver.Chrome:
         chrome_options = Options()
-        for argument in (
+
+        for arg in (
             "--headless=new",
             "--no-sandbox",
             "--disable-dev-shm-usage",
             "--disable-gpu",
             "--window-size=1440,1100",
             "--lang=en-US",
-            "--disable-blink-features=AutomationControlled",
         ):
-            chrome_options.add_argument(argument)
+            chrome_options.add_argument(arg)
 
-        chrome_options.add_experimental_option("excludeSwitches", ["enable-automation"])
-        chrome_options.add_experimental_option("useAutomationExtension", False)
         chrome_options.add_argument(
-            "--user-agent=Mozilla/5.0 (X11; Linux x86_64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/124.0.0.0 Safari/537.36"
+            "--user-agent=Mozilla/5.0 (X11; Linux x86_64) Chrome/124 Safari/537.36"
         )
 
-        binary = _which("google-chrome", "google-chrome-stable", "chromium-browser", "chromium")
+        binary = _which("google-chrome", "chromium", "chromium-browser")
         if binary:
             chrome_options.binary_location = binary
 
-        chromedriver_path = shutil.which("chromedriver")
-        service = Service(chromedriver_path) if chromedriver_path else Service()
+        service = Service(shutil.which("chromedriver") or "")
         return webdriver.Chrome(service=service, options=chrome_options)
 
     def _search(self, driver: webdriver.Chrome, keyword: str) -> str:
+        keyword_lower = keyword.casefold()
+
         driver.get(POLITICO_SEARCH.format(query=quote_plus(keyword)))
         self._wait_for_body(driver)
         sleep(2)
 
         links = self._article_links(driver)
-        if links:
-            return links[0]
+
+        # ✅ FIX: rank instead of returning first
+        best = self._rank_links(links, keyword_lower)
+        if best:
+            return best
 
         driver.get(POLITICO_HOME)
         self._wait_for_body(driver)
-        keyword_lower = keyword.casefold()
 
-        homepage_links = self._article_links(driver, require_text=keyword_lower)
-        if homepage_links:
-            return homepage_links[0]
+        links = self._article_links(driver)
+        best = self._rank_links(links, keyword_lower)
+        if best:
+            return best
 
-        all_homepage_links = self._article_links(driver)
-        return all_homepage_links[0] if all_homepage_links else ""
+        return ""
 
-    def _article_links(self, driver: webdriver.Chrome, require_text: str = "") -> list[str]:
-        found: list[str] = []
-        for element in driver.find_elements(By.CSS_SELECTOR, "a[href]"):
-            if require_text and require_text not in (element.text or "").casefold():
+    def _rank_links(self, links: list[str], keyword_lower: str) -> str:
+        if not links:
+            return ""
+
+        # prioritize keyword match in URL
+        for link in links:
+            if keyword_lower in link.casefold():
+                return link
+
+        return links[0]
+
+    def _article_links(self, driver: webdriver.Chrome) -> list[str]:
+        found = []
+
+        for el in driver.find_elements(By.CSS_SELECTOR, "a[href]"):
+            href = el.get_attribute("href") or ""
+            text = (el.text or "").casefold()
+
+            if not href:
                 continue
 
-            link = _normalize_politico_url(element.get_attribute("href") or "")
-            if link and link not in found:
-                found.append(link)
+            link = _normalize_politico_url(href)
+            if not link:
+                continue
 
-        return found
+            found.append(link)
+
+        return list(dict.fromkeys(found))  # remove duplicates
 
     def _read_article(self, driver: webdriver.Chrome) -> str:
         script = """
         const blocks = [];
-        const seen = new Set();
-        const add = (value) => {
-          const text = (value || '').replace(/\\s+/g, ' ').trim();
-          if (text.length > 0 && !seen.has(text)) {
-            seen.add(text);
-            blocks.push(text);
-          }
+        const add = (t) => {
+          if (t && t.trim().length > 0) blocks.push(t.trim());
         };
 
-        add(document.querySelector('h1')?.innerText || document.title);
+        add(document.querySelector('h1')?.innerText);
         add(document.querySelector('meta[name="description"]')?.content);
-        add(document.querySelector('meta[property="og:description"]')?.content);
 
-        const selectors = [
-          'article p',
-          'main p',
-          '[data-testid*="article"] p',
-          '[class*="story"] p',
-          '[class*="article"] p'
-        ];
-
-        for (const selector of selectors) {
-          for (const paragraph of document.querySelectorAll(selector)) {
-            const text = paragraph.innerText || '';
-            if (text.replace(/\\s+/g, ' ').trim().length >= 45) {
-              add(text);
+        document.querySelectorAll('article p').forEach(p => {
+            if (p.innerText && p.innerText.length > 40) {
+                add(p.innerText);
             }
-          }
-        }
+        });
 
-        if (blocks.length < 3) {
-          add(document.body?.innerText || '');
-        }
-
-        return blocks.join('\\n\\n');
+        return blocks.join("\\n\\n");
         """
         return _clean(driver.execute_script(script) or "")
 
     def _wait_for_body(self, driver: webdriver.Chrome) -> None:
         try:
-            WebDriverWait(driver, 20).until(
+            WebDriverWait(driver, 10).until(
                 expected.presence_of_element_located((By.CSS_SELECTOR, "body"))
             )
         except TimeoutException:
             pass
 
 
-def _normalize_politico_url(raw_url: str) -> str:
-    if not raw_url:
-        return ""
-
-    url_without_fragment, _fragment = urldefrag(raw_url)
-    parsed = urlparse(url_without_fragment)
-    if parsed.scheme not in {"http", "https"} or parsed.netloc not in POLITICO_HOSTS:
-        return ""
-
-    path = parsed.path.rstrip("/")
-    if _looks_like_article(path):
-        return f"https://www.politico.com{path}"
-
-    return ""
-
-
-def _looks_like_article(path: str) -> bool:
-    blocked = (
-        "/search",
-        "/about",
-        "/advertising",
-        "/contact",
-        "/events",
-        "/privacy",
-        "/staff",
-        "/video",
-    )
-    if any(path.startswith(prefix) for prefix in blocked):
-        return False
-
-    has_story_area = bool(ARTICLE_SEGMENTS.search(path))
-    has_year = bool(re.search(r"/20\d{2}/", path))
-    return has_story_area and has_year
-
-
-def _which(*commands: str) -> str:
-    for command in commands:
-        resolved = shutil.which(command)
-        if resolved:
-            return resolved
-    return ""
-
-
-def _clean(value: object) -> str:
-    text = unescape(str(value))
-    text = re.sub(r"<[^>]+>", "", text)
-    text = re.sub(r"[ \t]+", " ", text)
-    text = re.sub(r"\n{3,}", "\n\n", text)
-    return text.strip()
-
-
-def _is_security_check(text: str) -> bool:
-    lowered = text.casefold()
-    signals = (
-        "performing security verification",
-        "protect against malicious bots",
-        "verifies you are not a bot",
-        "cloudflare",
-    )
-    return any(signal in lowered for signal in signals)
-
+# =========================
+# HELPERS (FIXED)
+# =========================
 
 def _rss_fallback(keyword: str) -> Article:
     try:
-        request = urllib.request.Request(
-            POLITICO_RSS,
-            headers={
-                "User-Agent": (
-                    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-                    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-                )
-            },
-        )
-        with urllib.request.urlopen(request, timeout=20) as response:
-            xml_text = response.read().decode("utf-8", errors="replace")
+        req = urllib.request.Request(POLITICO_RSS)
+        with urllib.request.urlopen(req, timeout=10) as res:
+            xml_text = res.read().decode("utf-8", errors="ignore")
     except Exception:
         return Article("", "")
 
     try:
         root = ElementTree.fromstring(xml_text)
-    except ElementTree.ParseError:
+    except Exception:
         return Article("", "")
 
-    candidates = [_article_from_rss_item(item) for item in root.findall("./channel/item")]
-    candidates = [article for article in candidates if article.url]
+    items = root.findall("./channel/item")
+
+    candidates = []
+    for item in items:
+        title = item.findtext("title", "")
+        link = item.findtext("link", "")
+        desc = item.findtext("description", "")
+
+        body = _clean(title + " " + desc)
+
+        candidates.append(Article(link, body))
+
     if not candidates:
         return Article("", "")
 
     keyword_lower = keyword.casefold()
-    for article in candidates:
-        if keyword_lower in article.body.casefold():
-            return article
 
-    return candidates[0]
+    # ✅ FIX: rank RSS results
+    scored = sorted(
+        candidates,
+        key=lambda a: keyword_lower in a.body.casefold(),
+        reverse=True
+    )
+
+    return scored[0]
 
 
-def _article_from_rss_item(item: ElementTree.Element) -> Article:
-    title = item.findtext("title", default="")
-    link = item.findtext("link", default="")
-    description = item.findtext("description", default="")
-    content = item.findtext("{http://purl.org/rss/1.0/modules/content/}encoded", default="")
-    body = _clean("\n\n".join(part for part in (title, description, content) if part))
-    return Article(link.strip(), body)
+def _normalize_politico_url(url: str) -> str:
+    if not url:
+        return ""
+
+    parsed = urlparse(url)
+    if parsed.netloc not in POLITICO_HOSTS:
+        return ""
+
+    return url.split("?")[0]
+
+
+def _clean(text: str) -> str:
+    text = unescape(text)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+
+def _which(*cmds):
+    for c in cmds:
+        path = shutil.which(c)
+        if path:
+            return path
+    return ""
+
+
+def _is_security_check(text: str) -> bool:
+    return "bot" in text.lower() or "security" in text.lower()
