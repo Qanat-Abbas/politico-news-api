@@ -1,40 +1,37 @@
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import HTMLResponse
 
-from app.scraper import Article, PoliticoBrowser
+from app.scraper import PoliticoBrowser
 from app.summarizer import summarize
 
 REGISTRATION_NUMBER = "FA23-BAI-056"
 ASSIGNED_SOURCE = "Politico"
 
-api = FastAPI(
-    title="Politico Selenium Summary API",
-    description="Quiz 3 REST API for searching Politico with Selenium and Chrome.",
-    version="1.0.0",
-)
+api = FastAPI(title="Politico API")
 
 
 @api.get("/")
-def index() -> HTMLResponse:
-    return HTMLResponse(f"<h1>{REGISTRATION_NUMBER} - Politico API Running</h1>")
+def home():
+    return HTMLResponse(f"<h2>{REGISTRATION_NUMBER} - Politico API Running</h2>")
 
 
 @api.get("/get")
-def get_article_summary(keyword: str = Query(..., min_length=1)) -> dict:
-    requested = keyword.strip()
+def get_article_summary(keyword: str = Query(..., min_length=1)):
+    keyword = keyword.strip()
 
-    if not requested:
+    if not keyword:
         raise HTTPException(status_code=400, detail="keyword required")
 
-    article = PoliticoBrowser().first_result_for(requested)
-    summary = summarize(article.body, requested)
+    article = PoliticoBrowser().first_result_for(keyword)
+
+    summary = summarize(article.body, keyword)
 
     return {
         "registration": REGISTRATION_NUMBER,
         "newssource": ASSIGNED_SOURCE,
-        "keyword": requested,
+        "keyword": keyword,
         "url": article.url,
-        "summary": summary,
+        "summary": summary
     }
 
 
