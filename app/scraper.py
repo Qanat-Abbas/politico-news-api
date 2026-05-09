@@ -31,25 +31,29 @@ class Article:
 
 
 class PoliticoBrowser:
+    # =========================
+    # MAIN ENTRY
+    # =========================
     def first_result_for(self, keyword: str) -> Article:
         driver = self._open_browser()
 
         try:
-            result_url = self._search(driver, keyword)
+            url = self._search(driver, keyword)
 
-            if not result_url:
+            if not url:
                 return _rss_fallback(keyword)
 
-            driver.get(result_url)
+            driver.get(url)
             self._wait_for_body(driver)
             sleep(1)
 
             body = self._read_article(driver)
 
-            if not body or _is_security_check(body):
+            # 🔴 FIX: prevent empty junk summaries
+            if not body or len(body.strip()) < 200 or _is_security_check(body):
                 return _rss_fallback(keyword)
 
-            return Article(result_url, body)
+            return Article(url, body)
 
         except WebDriverException:
             return _rss_fallback(keyword)
@@ -95,18 +99,17 @@ class PoliticoBrowser:
         sleep(2)
 
         links = self._article_links(driver)
-
         best = self._rank_links(links, keyword_lower)
+
         if best:
             return best
 
+        # fallback homepage search
         driver.get(POLITICO_HOME)
         self._wait_for_body(driver)
 
         links = self._article_links(driver)
-        best = self._rank_links(links, keyword_lower)
-
-        return best or ""
+        return self._rank_links(links, keyword_lower)
 
     # =========================
     # LINK EXTRACTION
@@ -116,14 +119,11 @@ class PoliticoBrowser:
 
         for el in driver.find_elements(By.CSS_SELECTOR, "a[href]"):
             href = el.get_attribute("href") or ""
-            if not href:
-                continue
 
             link = _normalize_politico_url(href)
             if not link:
                 continue
 
-            # STRICT FILTER: only real article URLs
             if not _is_article_url(link):
                 continue
 
@@ -158,29 +158,50 @@ class PoliticoBrowser:
         return scored[0][1] if scored else ""
 
     # =========================
-    # ARTICLE SCRAPING
+    # ARTICLE EXTRACTION (FIXED CORE ISSUE)
     # =========================
     def _read_article(self, driver: webdriver.Chrome) -> str:
         script = """
         const text = [];
 
-        const add = (t) => {
-            if (t && t.trim().length > 0) text.push(t.trim());
-        };
+        function add(t) {
+            if (t && t.trim().length > 30) {
+                text.push(t.trim());
+            }
+        }
 
         add(document.querySelector('h1')?.innerText);
+        add(document.querySelector('meta[name="description"]')?.content);
+        add(document.querySelector('meta[property="og:description"]')?.content);
 
-        document.querySelectorAll('article p').forEach(p => {
-            if (p.innerText && p.innerText.length > 40) {
+        const selectors = [
+            'article p',
+            'main p',
+            'section p',
+            '[class*="story"] p',
+            '[class*="article"] p',
+            '[class*="content"] p'
+        ];
+
+        selectors.forEach(sel => {
+            document.querySelectorAll(sel).forEach(p => {
                 add(p.innerText);
-            }
+            });
         });
+
+        // fallback for Politico React layouts
+        if (text.length < 3) {
+            document.body.innerText.split('\\n').forEach(add);
+        }
 
         return text.join("\\n\\n");
         """
 
         return _clean(driver.execute_script(script) or "")
 
+    # =========================
+    # WAIT
+    # =========================
     def _wait_for_body(self, driver: webdriver.Chrome) -> None:
         try:
             WebDriverWait(driver, 10).until(
@@ -232,7 +253,7 @@ def _rss_fallback(keyword: str) -> Article:
 
 
 # =========================
-# URL VALIDATION
+# URL FILTERS
 # =========================
 def _normalize_politico_url(url: str) -> str:
     if not url:
@@ -248,8 +269,8 @@ def _normalize_politico_url(url: str) -> str:
 
 def _is_article_url(url: str) -> bool:
     return (
-        "/news/" in url
-        or "/story/" in url
+        "/story/" in url
+        or "/news/" in url
         or "/playbook/" in url
         or "/analysis/" in url
         or re.search(r"/20\d{2}/", url) is not None
@@ -267,9 +288,9 @@ def _clean(text: str) -> str:
 
 def _which(*cmds):
     for c in cmds:
-        path = shutil.which(c)
-        if path:
-            return path
+        p = shutil.which(c)
+        if p:
+            return p
     return ""
 
 
